@@ -17,6 +17,7 @@
 from verl.utils.megatron_utils import unwrap_model
 
 from .util import postprocess_packed_seqs, preprocess_packed_seqs, recover_left_padding, remove_left_padding
+from verl.utils.device import is_hpu_available
 
 
 def gptmodel_forward(
@@ -34,7 +35,7 @@ def gptmodel_forward(
     """Default forward pass for GPT models with optional sequence packing."""
     pre_process = unwrap_model(model).pre_process
     post_process = unwrap_model(model).post_process
-    if pack_seqs:
+    if pack_seqs and not is_hpu_available:
         batch_size, seq_len = attention_mask.shape[:2]
         input_ids_rmpad, packed_seq_params = preprocess_packed_seqs(input_ids, attention_mask, pre_process=pre_process)
         input_ids_rmpad = input_ids_rmpad.contiguous()
@@ -51,11 +52,18 @@ def gptmodel_forward(
         else:
             output = postprocess_packed_seqs(output_orig, packed_seq_params, attention_mask, batch_size, seq_len, post_process=post_process)
     else:
-        assert logits_processor is None, "logits_processor is not supported for non-packed sequence"
+        if not is_hpu_available:
+            assert logits_processor is None, "logits_processor is not supported for non-packed sequence"
         batch_size, sequence_length = attention_mask.shape
-        new_input_ids, new_attention_mask, new_position_ids = remove_left_padding(input_ids, attention_mask, position_ids, sequence_parallel, pre_process=pre_process)
+        force_keep_padding = kwargs.get("force_keep_padding", False)
+        alignment = kwargs.get("alignment", 0)
+        new_input_ids, new_attention_mask, new_position_ids = remove_left_padding(input_ids, attention_mask, position_ids, sequence_parallel, pre_process=pre_process, alignment=alignment, force_keep_padding=force_keep_padding)
         output = model(input_ids=new_input_ids, attention_mask=new_attention_mask, position_ids=new_position_ids)
         output = recover_left_padding(output, new_attention_mask, attention_mask, sequence_length, post_process=post_process)
+
+        if is_hpu_available and post_process and logits_processor is not None:
+            output = logits_processor(output, **logits_processor_args)
+
     if value_model and post_process:
         output = output[..., 0]
     return output
@@ -81,7 +89,7 @@ def gptmodel_forward_qwen2_5_vl(
     post_process = unwrap_model(model).post_process
     pixel_values = multi_modal_inputs["pixel_values"].to(input_ids.device) if "pixel_values" in multi_modal_inputs else None
     image_grid_thw = multi_modal_inputs["image_grid_thw"].to(input_ids.device) if "image_grid_thw" in multi_modal_inputs else None
-    if pack_seqs:
+    if pack_seqs and not is_hpu_available:
         batch_size, seq_len = attention_mask.shape[:2]
         input_ids_rmpad, packed_seq_params = preprocess_packed_seqs(input_ids, attention_mask, pre_process=True)
         input_ids_rmpad = input_ids_rmpad.contiguous()
@@ -102,7 +110,9 @@ def gptmodel_forward_qwen2_5_vl(
             output = postprocess_packed_seqs(output_orig, packed_seq_params, attention_mask, batch_size, seq_len, post_process=post_process)
     else:
         batch_size, sequence_length = attention_mask.shape
-        new_input_ids, new_attention_mask, new_position_ids = remove_left_padding(input_ids, attention_mask, position_ids, sequence_parallel, pre_process=pre_process)
+        force_keep_padding = kwargs.get("force_keep_padding", False)
+        alignment = kwargs.get("alignment", 0)
+        new_input_ids, new_attention_mask, new_position_ids = remove_left_padding(input_ids, attention_mask, position_ids, sequence_parallel, pre_process=pre_process, alignment=alignment, force_keep_padding=force_keep_padding)
         output = model(
             input_ids=new_input_ids,
             position_ids=new_position_ids,

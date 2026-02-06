@@ -45,6 +45,7 @@ from vllm.worker.worker_base import WorkerWrapperBase
 from verl import DataProto
 from verl.third_party.vllm import vllm_version
 from verl.utils.debug import GPUMemoryLogger
+from verl.utils.device import is_hpu_available
 from verl.utils.torch_functional import get_response_mask, pad_2d_list_to_length
 from verl.workers.rollout.base import BaseRollout
 
@@ -146,9 +147,15 @@ class vLLMRollout(BaseRollout):
         if config.get("limit_images", None):  # support for multi-image data
             engine_kwargs["limit_mm_per_prompt"] = {"image": config.get("limit_images")}
 
+        max_num_seqs = config.get("max_num_seqs", 0)
+        if max_num_seqs > 0:
+            engine_kwargs["max_num_seqs"] = max_num_seqs
+
+        force_enable_sleep_mode = config.get("enable_sleep_mode", True)
+        enable_sleep_mode = True if not is_hpu_available or force_enable_sleep_mode else False
         self.inference_engine = LLM(
             model=model_path,
-            enable_sleep_mode=True,
+            enable_sleep_mode=enable_sleep_mode,
             tensor_parallel_size=tensor_parallel_size,
             distributed_executor_backend="external_launcher",
             dtype=config.dtype,
@@ -161,15 +168,16 @@ class vLLMRollout(BaseRollout):
             disable_log_stats=config.disable_log_stats,
             max_num_batched_tokens=max_num_batched_tokens,
             enable_chunked_prefill=config.enable_chunked_prefill,
-            enable_prefix_caching=True,
+            enable_prefix_caching=config.enable_prefix_caching,
             trust_remote_code=trust_remote_code,
             seed=config.get("seed", 0),
             **lora_kwargs,
             **engine_kwargs,
         )
 
-        # Offload vllm model to reduce peak memory usage
-        self.inference_engine.sleep(level=1)
+        if enable_sleep_mode:
+            # Offload vllm model to reduce peak memory usage
+            self.inference_engine.sleep(level=1)
 
         kwargs = dict(
             n=1,

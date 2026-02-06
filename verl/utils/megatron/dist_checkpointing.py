@@ -15,12 +15,14 @@
 from megatron.core import dist_checkpointing, mpu
 from megatron.core.dist_checkpointing.serialization import get_default_load_sharded_strategy, get_default_save_sharded_strategy
 from megatron.core.dist_checkpointing.strategies.fully_parallel import FullyParallelLoadStrategyWrapper, FullyParallelSaveStrategyWrapper
+from verl.utils.device import is_hpu_available
 
 
 def save_dist_checkpointing(sharded_state_dict, ckpt_path, async_save=False):
     validate_sharding_integrity = True
     # Get checkpointing strategies
-    save_strategy = get_default_save_sharded_strategy("torch_dist")
+    ckpt_format = "zarr" if is_hpu_available else "torch_dist"
+    save_strategy = get_default_save_sharded_strategy(ckpt_format)
     save_strategy = FullyParallelSaveStrategyWrapper(save_strategy, mpu.get_data_parallel_group(with_context_parallel=True))
 
     # Save model sharded state dicts

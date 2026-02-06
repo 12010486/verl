@@ -31,7 +31,7 @@ from verl.third_party.vllm import LLM, vllm_version
 from verl.third_party.vllm import parallel_state as vllm_ps
 from verl.utils.debug import GPUMemoryLogger, log_gpu_memory_usage
 from verl.utils.debug.performance import simple_timer
-from verl.utils.device import get_torch_device
+from verl.utils.device import get_torch_device, get_device_name, is_hpu_available
 from verl.utils.megatron_utils import (
     load_megatron_model_to_gpu,
     offload_megatron_model_to_cpu,
@@ -115,6 +115,8 @@ class MegatronVLLMShardingManager(BaseShardingManager):
         else:
             self.gen_random_states = None
 
+        self.inference_engine_enable_sleep_mode = True
+
     @GPUMemoryLogger(role="megatron vllm sharding_manager", logger=logger)
     def __enter__(self):
         self.timing = {}
@@ -132,11 +134,12 @@ class MegatronVLLMShardingManager(BaseShardingManager):
                 per_tensor_param = per_tensor_generator(self.actor_module, self.model_config, self.weight_converter, self.transformer_config, self.layer_name_mapping, convert_qkv_gate_up_by_simple_split=False)
                 self.inference_engine.sync_model_weights(per_tensor_param, load_format="megatron")
             else:
-                # > 0.7.2
-                if "tags" in inspect.signature(self.inference_engine.wake_up).parameters:
-                    self.inference_engine.wake_up(tags=["weights"])
-                else:
-                    self.inference_engine.wake_up()
+                if self.inference_engine_enable_sleep_mode:
+                    # > 0.7.2
+                    if "tags" in inspect.signature(self.inference_engine.wake_up).parameters:
+                        self.inference_engine.wake_up(tags=["weights"])
+                    else:
+                        self.inference_engine.wake_up()
                 per_tensor_param = per_tensor_generator(
                     self.actor_module,
                     self.model_config,
@@ -144,7 +147,10 @@ class MegatronVLLMShardingManager(BaseShardingManager):
                     self.transformer_config,
                     self.layer_name_mapping,
                 )
-                model = self.model_runner.model
+                if is_hpu_available:
+                    model = self.model_runner.model.model
+                else:
+                    model = self.model_runner.model
                 patch_vllm_moe_model_weight_loader(model)
                 loaded_params = model.load_weights(per_tensor_param)
                 info = f"vLLM load weights, loaded_params: {len(loaded_params)}"
@@ -154,8 +160,9 @@ class MegatronVLLMShardingManager(BaseShardingManager):
                 offload_megatron_model_to_cpu(self.actor_module)
             get_torch_device().empty_cache()
 
-            if "tags" in inspect.signature(self.inference_engine.wake_up).parameters:
-                self.inference_engine.wake_up(tags=["kv_cache"])
+            if self.inference_engine_enable_sleep_mode:
+                if "tags" in inspect.signature(self.inference_engine.wake_up).parameters:
+                    self.inference_engine.wake_up(tags=["kv_cache"])
 
             # important: need to manually set the random states of each tp to be identical.
             if self.device_mesh is not None:
@@ -170,7 +177,10 @@ class MegatronVLLMShardingManager(BaseShardingManager):
         ):
             self.inference_engine.offload_model_weights()
         else:
-            self.inference_engine.sleep(level=1)
+            if self.inference_engine_enable_sleep_mode:
+                self.inference_engine.sleep(level=1)
+            else:
+                pass
         for model in self.actor_module:
             model.train()
 

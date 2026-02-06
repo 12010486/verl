@@ -17,6 +17,7 @@ from importlib.metadata import PackageNotFoundError, version
 from packaging import version as vs
 
 from verl.utils.import_utils import is_sglang_available
+from verl.utils.device import is_hpu_available
 
 
 def get_version(pkg):
@@ -37,12 +38,12 @@ elif package_version == "0.5.4":
     vllm_version = "0.5.4"
     from .vllm_v_0_5_4 import parallel_state
     from .vllm_v_0_5_4.llm import LLM, LLMEngine
-elif package_version == "0.6.3" or package_version.startswith("0.6.3"):
+elif (package_version == "0.6.3" or package_version.startswith("0.6.3")) and not is_hpu_available:
     # rocm version: "0.6.3+rocmxxx"
     vllm_version = "0.6.3"
     from .vllm_v_0_6_3 import parallel_state
     from .vllm_v_0_6_3.llm import LLM, LLMEngine
-elif vs.parse(package_version) >= vs.parse("0.7.0"):
+elif vs.parse(package_version) >= vs.parse("0.7.0") or is_hpu_available:
     # From 0.6.6.post2 on, vllm supports SPMD inference
     # See https://github.com/vllm-project/vllm/pull/12071
 

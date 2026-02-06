@@ -34,7 +34,7 @@ from megatron.core.utils import get_attr_wrapped_model
 from transformers import PretrainedConfig
 
 import verl.utils.megatron.tensor_parallel as tp_utils
-from verl.utils.device import get_device_id, get_device_name, get_torch_device
+from verl.utils.device import get_device_id, get_device_name, get_torch_device, is_hpu_available
 from verl.utils.fs import local_mkdir_safe
 from verl.utils.model import normalize_model_name
 from verl.utils.torch_dtypes import PrecisionType
@@ -251,7 +251,10 @@ def offload_megatron_model_to_cpu(models):
     """
     for model_chunk in models:
         if isinstance(model_chunk, DDP):
-            model_chunk_all_buffers = [model_chunk.buffers, model_chunk.expert_parallel_buffers]
+            if is_hpu_available:
+                model_chunk_all_buffers = [model_chunk.dense_buffers, model_chunk.expert_parallel_buffers]
+            else:
+                model_chunk_all_buffers = [model_chunk.buffers, model_chunk.expert_parallel_buffers]
             for buffers in model_chunk_all_buffers:
                 for buffer in buffers:
                     # offload parameters
@@ -280,7 +283,10 @@ def offload_megatron_model_to_cpu(models):
 def load_megatron_model_to_gpu(models, load_grad=True):
     for model_chunk in models:
         if isinstance(model_chunk, DDP):
-            model_chunk_all_buffers = [model_chunk.buffers, model_chunk.expert_parallel_buffers]
+            if is_hpu_available:
+                model_chunk_all_buffers = [model_chunk.dense_buffers, model_chunk.expert_parallel_buffers]
+            else:
+                model_chunk_all_buffers = [model_chunk.buffers, model_chunk.expert_parallel_buffers]
             for buffers in model_chunk_all_buffers:
                 for buffer in buffers:
                     # sometimes, we don't want to load grad for pure inference
@@ -547,7 +553,7 @@ def convert_megatron_model_to_transformers_model(
             new_params[f"model.layers.{layer_number}.self_attn.q_proj.{param_type}"] = param[0]
             new_params[f"model.layers.{layer_number}.self_attn.k_proj.{param_type}"] = param[1]
             new_params[f"model.layers.{layer_number}.self_attn.v_proj.{param_type}"] = param[2]
-    elif "mlp" in name:
+    elif "mlp" in name and not "pre_mlp_layernorm.weight" in name:
         splitted_name = name.split(".")
         layer_number = splitted_name[2]
         component = splitted_name[4]
@@ -575,6 +581,14 @@ def convert_megatron_model_to_transformers_model(
         new_params["model.norm.weight"] = param
     elif name == "output_layer.weight":
         new_params["lm_head.weight"] = param
+    elif "input_layernorm.weight" in name:
+        splitted_name = name.split(".")
+        layer_number = splitted_name[2]
+        new_params[f"model.layers.{layer_number}.input_layernorm.weight"] = param
+    elif "pre_mlp_layernorm.weight" in name:
+        splitted_name = name.split(".")
+        layer_number = splitted_name[2]
+        new_params[f"model.layers.{layer_number}.post_attention_layernorm.weight"] = param
     else:
         raise ValueError(f"Unknown param name: {name}")
     return new_params.keys(), new_params.values()

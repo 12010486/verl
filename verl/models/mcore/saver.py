@@ -22,7 +22,7 @@ from megatron.core.distributed import DistributedDataParallel as LocalDDP
 from megatron.core.transformer.module import Float16Module
 from torch.nn.parallel import DistributedDataParallel as torchDDP
 
-from verl.utils.device import get_device_id, get_torch_device
+from verl.utils.device import get_device_id, get_torch_device, is_hpu_available
 from verl.utils.logger import print_rank_0
 from verl.utils.megatron_utils import unwrap_model
 
@@ -364,11 +364,18 @@ def merge_megatron_ckpt_gptmodel(wrapped_models, config, dtype, is_value_model=F
             gpt_model_module = _get_gpt_model(models[src_virtual_pp_rank])
             sync_layer = gpt_model_module.decoder.layers[src_layer_idx]
 
-            _broadcast_tensor(
-                sync_layer.self_attention.linear_qkv.layer_norm_weight,
-                f"{layer_name}.input_layernorm.weight",
-                src_pp_rank=src_pp_rank,
-            )
+            if not is_hpu_available:
+                _broadcast_tensor(
+                    sync_layer.self_attention.linear_qkv.layer_norm_weight,
+                    f"{layer_name}.input_layernorm.weight",
+                    src_pp_rank=src_pp_rank,
+                )
+            else:
+                _broadcast_tensor(
+                    sync_layer.input_layernorm.weight,
+                    f"{layer_name}.input_layernorm.weight",
+                    src_pp_rank=src_pp_rank,
+                )
 
             if gpt_model_module.config.qk_layernorm:
                 _broadcast_tensor(
@@ -406,11 +413,18 @@ def merge_megatron_ckpt_gptmodel(wrapped_models, config, dtype, is_value_model=F
                 src_pp_rank=src_pp_rank,
             )
 
-            _broadcast_tensor(
-                sync_layer.mlp.linear_fc1.layer_norm_weight,
-                f"{layer_name}.post_attention_layernorm.weight",
-                src_pp_rank=src_pp_rank,
-            )
+            if not is_hpu_available:
+                _broadcast_tensor(
+                    sync_layer.mlp.linear_fc1.layer_norm_weight,
+                    f"{layer_name}.post_attention_layernorm.weight",
+                    src_pp_rank=src_pp_rank,
+                )
+            else:
+                _broadcast_tensor(
+                    sync_layer.pre_mlp_layernorm.weight,
+                    f"{layer_name}.post_attention_layernorm.weight",
+                    src_pp_rank=src_pp_rank,
+                )
 
             _broadcast_tp_shard_tensor_gate_up(
                 sync_layer.mlp.linear_fc1.weight,

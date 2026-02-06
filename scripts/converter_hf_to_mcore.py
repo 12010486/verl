@@ -31,6 +31,7 @@ from transformers import AutoConfig
 
 from verl.models.mcore import hf_to_mcore_config
 from verl.utils.megatron_utils import get_model
+from verl.utils.device import is_hpu_available
 
 
 def _init_args():
@@ -104,7 +105,10 @@ def convert_checkpoint_from_transformers_to_megatron(hf_model, model, hf_config)
     with torch.no_grad():
         model.embedding.word_embeddings.weight.copy_(hf_model.model.embed_tokens.weight)
         for layer, hf_layer in zip(model.decoder.layers, hf_model.model.layers):
-            layer.self_attention.linear_qkv.layer_norm_weight.copy_(hf_layer.input_layernorm.weight)
+            if not is_hpu_available:
+                layer.self_attention.linear_qkv.layer_norm_weight.copy_(hf_layer.input_layernorm.weight)
+            else:
+                layer.input_layernorm.weight.copy_(hf_layer.input_layernorm.weight)
 
             q = hf_layer.self_attn.q_proj.weight.view([num_key_value_heads, head_dim * num_attention_heads // num_key_value_heads, -1])
             k = hf_layer.self_attn.k_proj.weight.view([num_key_value_heads, head_dim, -1])

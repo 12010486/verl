@@ -28,7 +28,7 @@ from megatron.core.transformer.enums import AttnBackend
 from transformers import GenerationConfig
 
 from verl.models.weight_loader_registry import get_weight_saver
-from verl.utils.device import get_device_name, get_torch_device
+from verl.utils.device import get_device_name, get_torch_device, is_hpu_available
 from verl.utils.fs import is_non_local, local_mkdir_safe
 from verl.utils.logger import log_with_rank
 from verl.utils.megatron.dist_checkpointing import load_dist_checkpointing, save_dist_checkpointing
@@ -224,7 +224,7 @@ class MegatronCheckpointManager(BaseCheckpointManager):
             return common_path
         return os.path.join(common_path, basename)
 
-    def generate_state_dict(self):
+    def generate_state_dict(self, optim_sd_kwargs=None):
         # For save dist checkpointing
         state_dict = {}
 
@@ -244,7 +244,10 @@ class MegatronCheckpointManager(BaseCheckpointManager):
         # Optimizer State Dict
         if self.should_save_optimizer or self.should_load_optimizer:
             torch.distributed.barrier()
-            optimizer_sharded_states = self.optimizer.sharded_state_dict(state_dict)
+            if is_hpu_available:
+                optimizer_sharded_states = self.optimizer.sharded_state_dict(state_dict, **(optim_sd_kwargs or {}))
+            else:
+                optimizer_sharded_states = self.optimizer.sharded_state_dict(state_dict)
             state_dict["optimizer"] = optimizer_sharded_states
 
             if self.lr_scheduler is not None:
@@ -284,7 +287,11 @@ class MegatronCheckpointManager(BaseCheckpointManager):
         dist_checkpoint_path = get_dist_checkpoint_path(local_path)
 
         # Get State Dict for loading
-        sharded_state_dict = self.generate_state_dict()
+        if is_hpu_available:
+            optim_sd_kwargs = dict(is_loading=True)
+            sharded_state_dict = self.generate_state_dict(optim_sd_kwargs=optim_sd_kwargs)
+        else:
+            sharded_state_dict = self.generate_state_dict()
         log_with_rank(f"Generated state dict for saving: {sharded_state_dict.keys()}", rank=self.rank, logger=logger)
         for vpp_rank, model in enumerate(self.model):
             if len(self.model) > 1:

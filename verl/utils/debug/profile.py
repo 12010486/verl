@@ -19,6 +19,7 @@ from typing import Callable, Optional
 import torch
 import torch.distributed
 
+from verl.utils.device import is_hpu_available
 
 class Profiler:
     """A PyTorch profiler wrapper class for collecting performance metrics.
@@ -49,18 +50,28 @@ class Profiler:
         if config.use_profile and self.rank in self.config.profile_ranks:
             print(f"[Profiler] Profiler init for rank {self.rank}")
 
-            self.prof = torch.profiler.profile(
-                activities=[
+            if not is_hpu_available:
+                prof_activities = [
                     torch.profiler.ProfilerActivity.CPU,
                     torch.profiler.ProfilerActivity.CUDA,
-                ],
+                ]
+                prof_record_shape = True
+            else:
+                prof_activities = [
+                    torch.profiler.ProfilerActivity.CPU,
+                    torch.profiler.ProfilerActivity.HPU,
+                ]
+                prof_record_shape = False
+
+            self.prof = torch.profiler.profile(
+                activities=prof_activities,
                 schedule=torch.profiler.schedule(
                     wait=max(self.config.step_start - 1, 0),
                     warmup=1 if self.config.step_start > 0 else 0,
                     active=self.config.step_end - self.config.step_start,
                     repeat=1,
                 ),
-                record_shapes=True,
+                record_shapes=prof_record_shape,
                 with_stack=True,
             )
 

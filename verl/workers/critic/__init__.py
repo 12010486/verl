@@ -13,6 +13,12 @@
 # limitations under the License.
 
 from .base import BasePPOCritic
-from .dp_critic import DataParallelPPOCritic
+from verl.utils.device import is_hpu_available
+
+if not is_hpu_available:
+    from .dp_critic import DataParallelPPOCritic
+else:
+    # TODO support FSDP for HPU
+    pass
 
 __all__ = ["BasePPOCritic", "DataParallelPPOCritic"]

@@ -18,6 +18,7 @@ from verl.utils.device import get_torch_device
 
 VALID_CONFIG_TYPE = {"llama", "qwen2", "qwen2_vl", "qwen2_5_vl", "qwen3", "qwen3_moe", "deepseek_v3", "minicpmv", "minicpmo"}
 
+GAUDI_DEVICE_TYPE = None
 
 def get_device_flops(unit="T"):
     def unit_convert(number, level):
@@ -49,6 +50,19 @@ def get_device_flops(unit="T"):
         flops = 354e12
     elif "RTX 3070 Ti" in device_name:
         flops = 21.75e12
+    elif "GAUDI2" in device_name:
+        global GAUDI_DEVICE_TYPE
+        if GAUDI_DEVICE_TYPE is None:
+            import pyhlml
+            pyhlml.hlmlInit()
+            GAUDI_DEVICE_TYPE = pyhlml.hlmlDeviceGetName(pyhlml.hlmlDeviceGetHandleByIndex(0))
+            if GAUDI_DEVICE_TYPE is not None:
+                GAUDI_DEVICE_TYPE = GAUDI_DEVICE_TYPE.decode("utf-8")
+            pyhlml.hlmlShutdown()
+        if "HL-225C" == GAUDI_DEVICE_TYPE:
+            flops = 288e12
+        elif "HL-225D" == GAUDI_DEVICE_TYPE:
+            flops = 138e12
     flops_unit = unit_convert(flops, unit)
     return flops_unit
 

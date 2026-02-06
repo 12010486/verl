@@ -16,6 +16,7 @@ from importlib.metadata import PackageNotFoundError, version
 
 from packaging.version import Version
 
+from verl.utils.device import is_hpu_available
 
 def get_version(pkg):
     try:
@@ -39,7 +40,7 @@ if "ROCM_PATH" in os.environ:
         raise ValueError(f"Warning: Could not parse version format: {vllm_package_version}")
 ###
 
-if Version(vllm_package_version) <= Version("0.6.3"):
+if Version(vllm_package_version) <= Version("0.6.3") and not is_hpu_available:
     vllm_mode = "customized"
     from .fire_vllm_rollout import FIREvLLMRollout  # noqa: F401
     from .vllm_rollout import vLLMRollout  # noqa: F401

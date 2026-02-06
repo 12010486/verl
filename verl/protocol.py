@@ -34,7 +34,7 @@ from packaging import version
 from tensordict import TensorDict
 from torch.utils.data import DataLoader
 
-from verl.utils.device import get_device_id, get_torch_device
+from verl.utils.device import get_device_id, get_torch_device, is_hpu_available
 from verl.utils.py_functional import union_two_dict
 from verl.utils.torch_functional import allgather_dict_tensors
 
@@ -394,7 +394,11 @@ class DataProto:
 
         """
         if self.batch is not None:
-            self.batch = self.batch.to(device)
+            if not is_hpu_available:
+                self.batch = self.batch.to(device)
+            else:
+                for key in self.batch.keys():
+                    self.batch[key] = self.batch[key].to(device)
         return self
 
     def select(self, batch_keys=None, non_tensor_batch_keys=None, meta_info_keys=None, deepcopy=False) -> "DataProto":
@@ -890,7 +894,11 @@ def all_gather_data_proto(data: DataProto, process_group):
     group_size = torch.distributed.get_world_size(group=process_group)
     assert isinstance(data, DataProto)
     prev_device = data.batch.device
-    data.batch = data.batch.to(get_device_id())
+    if not is_hpu_available:
+        data.batch = data.batch.to(get_device_id())
+    else:
+        for key in data.batch.keys():
+            data.batch[key] = data.batch[key].to("hpu")
     data.batch = allgather_dict_tensors(data.batch.contiguous(), size=group_size, group=process_group, dim=0)
     data.batch = data.batch.to(prev_device)
     # all gather non_tensor_batch

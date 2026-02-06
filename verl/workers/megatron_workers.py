@@ -35,9 +35,10 @@ from verl.utils import hf_tokenizer, omega_conf_to_dataclass
 from verl.utils.checkpoint.megatron_checkpoint_manager import MegatronCheckpointManager
 from verl.utils.debug import DistProfiler, DistProfilerExtension, GPUMemoryLogger, ProfilerConfig, log_gpu_memory_usage, simple_timer
 from verl.utils.debug.performance import reduce_timing
-from verl.utils.device import get_device_id, get_device_name, get_nccl_backend, get_torch_device
+from verl.utils.device import get_device_id, get_device_name, get_nccl_backend, get_torch_device, is_hpu_available
 from verl.utils.flops_counter import FlopsCounter
 from verl.utils.fs import copy_to_local
+from verl.utils.hpu_utils import is_lazy_mode
 from verl.utils.megatron_utils import (
     load_megatron_model_to_gpu,
     load_megatron_optimizer,
@@ -48,6 +49,9 @@ from verl.utils.model import load_mcore_dist_weights, load_megatron_gptmodel_wei
 from verl.workers.actor.megatron_actor import MegatronPPOActor
 from verl.workers.critic.megatron_critic import MegatronPPOCritic
 from verl.workers.reward_model.megatron.reward_model import MegatronRewardModel
+
+if is_hpu_available:
+    from megatron.core.transformer.transformer_config import set_cag_dtype_cast_wa
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
@@ -153,6 +157,50 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
                 assert self.config.ref.get("log_prob_micro_batch_size_per_gpu", None) is not None, "Please note that in the ref policy configuration, `log_prob_micro_batch_size_per_gpu` and `log_prob_micro_batch_size` should not be None at the same time."
             self._ref_is_offload_param = self.config.ref.megatron.get("param_offload", False)
 
+    def setup_extra_tfconfig(self):
+        # overwrite variable_seq_lengths
+        self.tf_config.variable_seq_lengths = ((self._is_actor and self.config.actor.get("force_keep_padding", False) is False) \
+                or (self._is_ref and self.config.ref.get("force_keep_padding", False) is False))
+
+        if is_hpu_available:
+            # append use_fused_sdpa config
+            if self._is_actor:
+                self.tf_config.use_fused_sdpa = self.config.actor.megatron.get("use_fused_sdpa", False)
+                self.tf_config.use_fused_sdpa_with_recompute = self.config.actor.megatron.get("use_fused_sdpa_with_recompute", False)
+                self.tf_config.use_fused_sdpa_with_sync = self.config.actor.megatron.get("use_fused_sdpa_with_sync", False)
+            elif self._is_ref:
+                self.tf_config.use_fused_sdpa = self.config.ref.megatron.get("use_fused_sdpa", False)
+                self.tf_config.use_fused_sdpa_with_recompute = self.config.ref.megatron.get("use_fused_sdpa_with_recompute", False)
+                self.tf_config.use_fused_sdpa_with_sync = self.config.ref.megatron.get("use_fused_sdpa_with_sync", False)
+
+            # fusions
+            actor_fusions = self.config.actor.megatron.get("apply_fusions", False)
+            ref_fusions = self.config.ref.megatron.get("apply_fusions", False)
+            if (self._is_actor and actor_fusions) or (self._is_ref and ref_fusions):
+                if is_lazy_mode():
+                    self.tf_config.bias_activation_fusion = False
+                    self.tf_config.bias_dropout_fusion = False
+                else:
+                    self.tf_config.bias_activation_fusion = True
+                    self.tf_config.bias_dropout_fusion = True
+                self.tf_config.masked_softmax_fusion = False
+                self.tf_config.apply_rope_fusion = True
+            else:
+                self.tf_config.bias_activation_fusion = False
+                self.tf_config.bias_dropout_fusion = False
+                self.tf_config.masked_softmax_fusion = False
+                self.tf_config.apply_rope_fusion = False
+
+            # torch.compile settings
+            if self._is_actor:
+                use_torch_compile = self.config.actor.megatron.get("use_torch_compile", False)
+                use_torch_compiled_autograd = self.config.actor.megatron.get("use_torch_compiled_autograd", False)
+                if use_torch_compile and use_torch_compiled_autograd:
+                    torch._C._set_autograd_fallback_mode("nothing")
+                    self.tf_config.enable_compiled_autograd = True
+                    if self.rank == 0:
+                        print('Compiled Autograd enabled')
+
     def _build_model_optimizer(self, model_path, optim_config, override_model_config, override_transformer_config):
         from megatron.core.models.gpt.gpt_model import ModelType
 
@@ -163,11 +211,30 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
         self._init_hf_config_and_tf_config(model_path, model_path, self.dtype, override_model_config, override_transformer_config, self.config.model.get("trust_remote_code", False))
         self.generation_config = get_generation_config(self.local_path)
 
+        self.setup_extra_tfconfig()
+
         def megatron_actor_model_provider(pre_process, post_process):
             from verl.models.mcore import init_mcore_model
 
+            if is_hpu_available and self._is_actor:
+                use_torch_compiled_autograd = self.config.actor.megatron.get("use_torch_compiled_autograd", False)
+                set_cag_dtype_cast_wa(use_torch_compiled_autograd)
+
             parallel_model = init_mcore_model(self.tf_config, self.hf_config, pre_process, post_process, share_embeddings_and_output_weights=self.share_embeddings_and_output_weights, value=False, freeze_moe_router=override_model_config.get("moe_config", {}).get("freeze_moe_router", False))
             parallel_model.to(get_device_name())
+
+            if is_hpu_available:
+                use_torch_compile = False
+                if self._is_actor:
+                    use_torch_compile = self.config.actor.megatron.get("use_torch_compile", False)
+                    torch_compile_dynamic = self.config.actor.megatron.get("torch_compile_dynamic", None)
+                elif self._is_ref:
+                    use_torch_compile = self.config.ref.megatron.get("use_torch_compile", False)
+                    torch_compile_dynamic = self.config.ref.megatron.get("torch_compile_dynamic", None)
+
+                if use_torch_compile:
+                    parallel_model = torch.compile(parallel_model, backend="hpu_backend", dynamic=torch_compile_dynamic)
+
             return parallel_model
 
         # Step 3: initialize the megatron model
@@ -240,7 +307,8 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
             infer_tp = self.config.rollout.tensor_model_parallel_size
             dp = self.world_size // infer_tp
             assert self.world_size % infer_tp == 0, f"rollout world_size: {self.world_size} is not divisible by infer_tp: {infer_tp}"
-            rollout_device_mesh = init_device_mesh(get_device_name(), mesh_shape=(dp, infer_tp), mesh_dim_names=["dp", "infer_tp"])
+            device_type = "hpu" if is_hpu_available else "cuda"
+            rollout_device_mesh = init_device_mesh(device_type, mesh_shape=(dp, infer_tp), mesh_dim_names=["dp", "infer_tp"])
             log_gpu_memory_usage("Before building vllm rollout", logger=None)
 
             local_path = copy_to_local(self.config.model.path, use_shm=self.config.model.get("use_shm", False))
@@ -279,6 +347,11 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
                 device_mesh=rollout_device_mesh,
                 offload_param=self._is_offload_param,
             )
+
+            if hasattr(sharding_manager, "inference_engine_enable_sleep_mode"):
+                force_enable_sleep_mode = self.config.rollout.get("enable_sleep_mode", True)
+                setattr(sharding_manager, "inference_engine_enable_sleep_mode", True if not is_hpu_available or force_enable_sleep_mode else False)
+
             log_gpu_memory_usage("After building sharding manager", logger=logger)
 
         elif self.config.rollout.name in ["sglang", "sglang_async"]:
@@ -335,6 +408,16 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def init_model(self):
+        if is_hpu_available:
+            actor_use_torch_compile = self.config.actor.megatron.get("use_torch_compile", False)
+            ref_use_torch_compile = self.config.ref.megatron.get("use_torch_compile", False)
+            actor_torch_compile_cache_limit = self.config.actor.megatron.get("torch_compile_cache_size_limit", 0)
+            ref_torch_compile_cache_limit = self.config.ref.megatron.get("torch_compile_cache_size_limit", 0)
+            min_cache_limit = min(actor_torch_compile_cache_limit, ref_torch_compile_cache_limit)
+            if actor_use_torch_compile or ref_use_torch_compile:
+                if min_cache_limit > 0:
+                    torch._dynamo.config.cache_size_limit = min_cache_limit
+
         if self.config.model.get("external_lib", None) is not None:
             # This is used to import external_lib into the huggingface systems
             import importlib
@@ -441,7 +524,11 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
         if self._is_offload_optimizer:
             load_megatron_optimizer(self.actor_optimizer)
             log_gpu_memory_usage("After load actor optimizer during update_actor", logger=logger)
-        data.batch = data.batch.to(get_device_name())
+        if not is_hpu_available:
+            data.batch = data.batch.to(get_device_name())
+        else:
+            for key in data.batch.keys():
+                data.batch[key] = data.batch[key].to("hpu")
 
         micro_batch_size = self.config.actor.ppo_micro_batch_size_per_gpu
         data.meta_info["micro_batch_size"] = micro_batch_size
@@ -476,7 +563,12 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
     @DistProfiler.annotate(color="red")
     def generate_sequences(self, prompts: DataProto):
         assert self._is_rollout
-        prompts.batch = prompts.batch.to(get_device_name())
+        if not is_hpu_available:
+            prompts.batch = prompts.batch.to(get_device_name())
+        else:
+            for key in prompts.batch.keys():
+                prompts.batch[key] = prompts.batch[key].to("hpu")
+
         meta_info = {
             "eos_token_id": self.generation_config.eos_token_id if self.generation_config is not None else self.tokenizer.eos_token_id,
             "pad_token_id": self.generation_config.pad_token_id if self.generation_config is not None else self.tokenizer.pad_token_id,
