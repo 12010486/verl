@@ -31,9 +31,19 @@ def is_torch_npu_available() -> bool:
     except ImportError:
         return False
 
+def is_torch_hpu_available() -> bool:
+    """Check the availability of HPU"""
+    try:
+        import habana_frameworks.torch as htorch
+
+        return htorch.hpu.is_available()
+    except ImportError:
+        return False
+
 
 is_cuda_available = torch.cuda.is_available()
 is_npu_available = is_torch_npu_available()
+is_hpu_available = is_torch_hpu_available()
 
 
 def get_visible_devices_keyword() -> str:
@@ -62,6 +72,8 @@ def get_device_name() -> str:
         device = "cuda"
     elif is_npu_available:
         device = "npu"
+    elif is_hpu_available:
+        device = "hpu"
     else:
         device = "cpu"
     return device
@@ -104,6 +116,8 @@ def get_nccl_backend() -> str:
         str: Backend name ('hccl' for NPU, 'nccl' for CUDA/default).
     """
     if is_npu_available:
+        return "hccl"
+    elif is_hpu_available:
         return "hccl"
     else:
         # default to nccl

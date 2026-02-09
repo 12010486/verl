@@ -35,8 +35,11 @@ _DEVICE_FLOPS = {
     "910B": 354e12,
     "Ascend910": 354e12,
     "RTX 3070 Ti": 21.75e12,
+    "HL-225C": 288e12,
+    "HL-225D": 138e12,
 }
 
+GAUDI_DEVICE_TYPE = None
 
 def get_device_flops(unit="T", device_name=None):
     """Get the theoretical FLOPS (Floating Point Operations Per Second) capacity of the current device.

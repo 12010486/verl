@@ -123,6 +123,8 @@ class RayResourcePool(ResourcePool):
             device_name = "NPU"
         elif device_name == "cuda":
             device_name = "GPU"
+        elif device_name == "hpu":
+            device_name = "HPU"
 
         bundle = {"CPU": self.max_colocate_count}
         if self.use_gpu:
@@ -320,6 +322,8 @@ class RayClassWithInitArgs(ClassWithInitArgs):
             options["num_gpus"] = num_gpus
         if use_gpu and device_name == "npu":
             options["resources"] = {"NPU": num_gpus}
+        if use_gpu and device_name == "hpu":
+            options["resources"] = {"HPU": num_gpus}
 
         if len(self._additional_resource) > 1:
             for k, v in self._additional_resource.items():

@@ -18,7 +18,8 @@ import time
 import torch
 import torch.distributed as dist
 
-from verl.utils.device import get_device_id, get_torch_device
+from verl.utils.device import get_device_id, get_torch_device, is_hpu_available
+from verl.utils.hpu_utils import is_lazy_mode
 
 from .saver import _megatron_calc_global_rank
 
@@ -182,6 +183,8 @@ def load_state_dict_to_megatron_gptmodel(state_dict, wrapped_models, config, par
             dist.broadcast(sync_tensor, src=src_rank, group=mp_group)
             if (i == tp_rank) and (tensor is not None):
                 tensor.data.copy_(sync_tensor)
+                if is_hpu_available and is_lazy_mode():
+                    torch.hpu.synchronize()
 
     def _broadcast_tp_shard_tensor(tensor, name, chunk_dim=0, mutate_func=None) -> torch.Tensor:
         """broadcast tensor in tp shards across mp_group"""
@@ -229,6 +232,8 @@ def load_state_dict_to_megatron_gptmodel(state_dict, wrapped_models, config, par
             dist.broadcast(sync_tensor, src=src_rank, group=mp_group)
             if (i == tp_rank) and (tensor is not None):
                 tensor.data.copy_(sync_tensor)
+                if is_hpu_available and is_lazy_mode():
+                    torch.hpu.synchronize()
 
     def _broadcast_tp_shard_tensor_gate_up(tensor, gate_name, up_name) -> torch.Tensor:
         """broadcast tensor in tp shards across mp_group"""
@@ -284,6 +289,8 @@ def load_state_dict_to_megatron_gptmodel(state_dict, wrapped_models, config, par
             dist.broadcast(sync_tensor, src=src_rank, group=mp_group)
             if (i == tp_rank) and (tensor is not None):
                 tensor.data.copy_(sync_tensor)
+                if is_hpu_available and is_lazy_mode():
+                    torch.hpu.synchronize()
 
     def _broadcast_tp_shard_tensor_qkv(tensor, q_name, k_name, v_name, bias=False) -> torch.Tensor:
         """broadcast tensor in tp shards across mp_group"""
@@ -379,6 +386,8 @@ def load_state_dict_to_megatron_gptmodel(state_dict, wrapped_models, config, par
             dist.broadcast(sync_tensor, src=src_rank, group=mp_group)
             if (i == tp_rank) and (tensor is not None):
                 tensor.data.copy_(sync_tensor)
+                if is_hpu_available and is_lazy_mode():
+                    torch.hpu.synchronize()
 
     if dp_rank == 0:
         # Embeddings
@@ -402,10 +411,16 @@ def load_state_dict_to_megatron_gptmodel(state_dict, wrapped_models, config, par
             gpt_model_module = _get_gpt_model(models[dst_virtual_pp_rank])
             sync_layer = gpt_model_module.decoder.layers[dst_layer_idx]
 
-            _broadcast_tensor(
-                sync_layer.self_attention.linear_qkv.layer_norm_weight if dst_pp_rank == pp_rank else None,
-                f"{layer_name}.input_layernorm.weight",
-            )
+            if not is_hpu_available:
+                _broadcast_tensor(
+                    sync_layer.self_attention.linear_qkv.layer_norm_weight if dst_pp_rank == pp_rank else None,
+                    f"{layer_name}.input_layernorm.weight",
+                )
+            else:
+                _broadcast_tensor(
+                    sync_layer.input_layernorm.weight if dst_pp_rank == pp_rank else None,
+                    f"{layer_name}.input_layernorm.weight",
+                )
 
             if f"{layer_name}.self_attn.q_norm.weight" in state_dict:
                 _broadcast_tensor(
@@ -437,10 +452,17 @@ def load_state_dict_to_megatron_gptmodel(state_dict, wrapped_models, config, par
                 f"{layer_name}.self_attn.o_proj.weight",
                 chunk_dim=1,
             )
-            _broadcast_tensor(
-                sync_layer.mlp.linear_fc1.layer_norm_weight if dst_pp_rank == pp_rank else None,
-                f"{layer_name}.post_attention_layernorm.weight",
-            )
+
+            if not is_hpu_available:
+                _broadcast_tensor(
+                    sync_layer.mlp.linear_fc1.layer_norm_weight if dst_pp_rank == pp_rank else None,
+                    f"{layer_name}.post_attention_layernorm.weight",
+                )
+            else:
+                _broadcast_tensor(
+                    sync_layer.pre_mlp_layernorm.weight if dst_pp_rank == pp_rank else None,
+                    f"{layer_name}.post_attention_layernorm.weight",
+                )
 
             _broadcast_tp_shard_tensor_gate_up(
                 sync_layer.mlp.linear_fc1.weight if dst_pp_rank == pp_rank else None,

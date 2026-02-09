@@ -19,7 +19,7 @@ import os
 from packaging.version import parse as parse_version
 
 from .protocol import DataProto
-from .utils.device import is_npu_available
+from .utils.device import is_npu_available, is_hpu_available
 from .utils.import_utils import import_external_libs
 from .utils.logging_utils import set_basic_config
 
@@ -101,3 +101,21 @@ if is_npu_available:
             device_module.synchronize()
 
         TensorDictBase._sync_all = _sync_all_patch
+
+if is_hpu_available:
+    module_id = os.getenv('HLS_MODULE_ID', None)
+    if module_id is not None:
+        print(f"WARNING: HLS_MODULE_ID is set ({module_id}), unset it to initialize it correctly.")
+        os.environ.pop('HLS_MODULE_ID', None)
+
+    # TODO verify if this can be removed when rebase to new version with https://github.com/volcengine/verl/pull/1465
+    visible_modules = os.getenv('HABANA_VISIBLE_MODULES', None)
+    if visible_modules is not None:
+        print(f"WARNING: HABANA_VISIBLE_MODULES is set ({visible_modules}), unset it to initialize it correctly.")
+        os.environ.pop('HABANA_VISIBLE_MODULES', None)
+
+    ray_local_rank = os.getenv('RAY_LOCAL_RANK', None)
+    local_rank = os.getenv('LOCAL_RANK', None)
+    if ray_local_rank is not None and local_rank is not None and ray_local_rank != local_rank:
+        print(f"WARNING: RAY_LOCAL_RANK ({ray_local_rank}) and LOCAL_RANK ({local_rank}) are set differently, set LOCAL_RANK to RAY_LOCAL_RANK.")
+        os.environ['LOCAL_RANK'] = ray_local_rank

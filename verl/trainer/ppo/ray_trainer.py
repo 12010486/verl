@@ -108,7 +108,7 @@ class ResourcePoolManager:
         """Check if the resource pool can be satisfied in this ray cluster."""
         node_available_resources = ray._private.state.available_resources_per_node()
         node_available_gpus = {
-            node: node_info.get("GPU", 0) if "GPU" in node_info else node_info.get("NPU", 0)
+            node: node_info.get("GPU", 0) if "GPU" in node_info else node_info.get("NPU", 0) if "NPU" in node_info else node_info.get("HPU", 0) 
             for node, node_info in node_available_resources.items()
         }
 

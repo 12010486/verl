@@ -47,11 +47,13 @@ from verl.utils.device import (
     get_nccl_backend,
     get_torch_device,
     set_expandable_segments,
+     is_hpu_available,
 )
 from verl.utils.distributed import set_numa_affinity
 from verl.utils.flops_counter import FlopsCounter
 from verl.utils.fs import copy_to_local
 from verl.utils.megatron.router_replay_patch import RouterReplay, RouterReplayAction, apply_router_replay_patch
+from verl.utils.hpu_utils import is_lazy_mode
 from verl.utils.megatron_utils import (
     load_megatron_model_to_gpu,
     load_megatron_optimizer,
@@ -78,6 +80,9 @@ from verl.workers.config import HFModelConfig, McoreCriticConfig, RolloutConfig
 from verl.workers.critic.megatron_critic import MegatronPPOCritic
 from verl.workers.reward_model.megatron.reward_model import MegatronRewardModel
 from verl.workers.rollout import get_rollout_class
+
+if is_hpu_available:
+    from megatron.core.transformer.transformer_config import set_cag_dtype_cast_wa
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
@@ -353,6 +358,50 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
                 )
             self._ref_is_offload_param = self.config.ref.megatron.get("param_offload", False)
 
+    def setup_extra_tfconfig(self):
+        # overwrite variable_seq_lengths
+        self.tf_config.variable_seq_lengths = ((self._is_actor and self.config.actor.get("force_keep_padding", False) is False) \
+                or (self._is_ref and self.config.ref.get("force_keep_padding", False) is False))
+
+        if is_hpu_available:
+            # append use_fused_sdpa config
+            if self._is_actor:
+                self.tf_config.use_fused_sdpa = self.config.actor.megatron.get("use_fused_sdpa", False)
+                self.tf_config.use_fused_sdpa_with_recompute = self.config.actor.megatron.get("use_fused_sdpa_with_recompute", False)
+                self.tf_config.use_fused_sdpa_with_sync = self.config.actor.megatron.get("use_fused_sdpa_with_sync", False)
+            elif self._is_ref:
+                self.tf_config.use_fused_sdpa = self.config.ref.megatron.get("use_fused_sdpa", False)
+                self.tf_config.use_fused_sdpa_with_recompute = self.config.ref.megatron.get("use_fused_sdpa_with_recompute", False)
+                self.tf_config.use_fused_sdpa_with_sync = self.config.ref.megatron.get("use_fused_sdpa_with_sync", False)
+
+            # fusions
+            actor_fusions = self.config.actor.megatron.get("apply_fusions", False)
+            ref_fusions = self.config.ref.megatron.get("apply_fusions", False)
+            if (self._is_actor and actor_fusions) or (self._is_ref and ref_fusions):
+                if is_lazy_mode():
+                    self.tf_config.bias_activation_fusion = False
+                    self.tf_config.bias_dropout_fusion = False
+                else:
+                    self.tf_config.bias_activation_fusion = True
+                    self.tf_config.bias_dropout_fusion = True
+                self.tf_config.masked_softmax_fusion = False
+                self.tf_config.apply_rope_fusion = True
+            else:
+                self.tf_config.bias_activation_fusion = False
+                self.tf_config.bias_dropout_fusion = False
+                self.tf_config.masked_softmax_fusion = False
+                self.tf_config.apply_rope_fusion = False
+
+            # torch.compile settings
+            if self._is_actor:
+                use_torch_compile = self.config.actor.megatron.get("use_torch_compile", False)
+                use_torch_compiled_autograd = self.config.actor.megatron.get("use_torch_compiled_autograd", False)
+                if use_torch_compile and use_torch_compiled_autograd:
+                    torch._C._set_autograd_fallback_mode("nothing")
+                    self.tf_config.enable_compiled_autograd = True
+                    if self.rank == 0:
+                        print('Compiled Autograd enabled')
+
     def _build_model_optimizer(
         self, model_path, optim_config, override_model_config, override_transformer_config, override_ddp_config=None
     ):
@@ -378,10 +427,36 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
             self.config.model.get("trust_remote_code", False),
         )
 
-        if self._is_actor or self._is_rollout:
-            wrap_config = McoreModuleWrapperConfig(
-                is_value_model=False,  # actor is not value model
-                share_embeddings_and_output_weights=self.share_embeddings_and_output_weights,
+        self.setup_extra_tfconfig()
+
+        def megatron_actor_model_provider(pre_process, post_process):
+            from verl.models.mcore import init_mcore_model
+
+            if is_hpu_available and self._is_actor:
+                use_torch_compiled_autograd = self.config.actor.megatron.get("use_torch_compiled_autograd", False)
+                set_cag_dtype_cast_wa(use_torch_compiled_autograd)
+
+            parallel_model = init_mcore_model(self.tf_config, self.hf_config, pre_process, post_process, share_embeddings_and_output_weights=self.share_embeddings_and_output_weights, value=False, freeze_moe_router=override_model_config.get("moe_config", {}).get("freeze_moe_router", False))
+            parallel_model.to(get_device_name())
+
+            if is_hpu_available:
+                use_torch_compile = False
+                if self._is_actor:
+                    use_torch_compile = self.config.actor.megatron.get("use_torch_compile", False)
+                    torch_compile_dynamic = self.config.actor.megatron.get("torch_compile_dynamic", None)
+                elif self._is_ref:
+                    use_torch_compile = self.config.ref.megatron.get("use_torch_compile", False)
+                    torch_compile_dynamic = self.config.ref.megatron.get("torch_compile_dynamic", None)
+
+                if use_torch_compile:
+                    parallel_model = torch.compile(parallel_model, backend="hpu_backend", dynamic=torch_compile_dynamic)
+
+            return parallel_model
+
+        # Step 3: initialize the megatron model
+        if self._is_actor and self._is_rollout:
+            actor_module = get_model(
+                megatron_actor_model_provider,
                 wrap_with_ddp=True,
                 use_distributed_optimizer=self.config.actor.megatron.use_distributed_optimizer,
             )
@@ -505,8 +580,9 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
         assert self.world_size % infer_world_size == 0, (
             f"rollout world_size: {self.world_size} is not divisible by infer_world_size: {infer_world_size}"
         )
+        device_type = "hpu" if is_hpu_available else "cuda"
         rollout_device_mesh = init_device_mesh(
-            get_device_name(), mesh_shape=(dp, infer_tp, infer_pp), mesh_dim_names=["dp", "infer_tp", "infer_pp"]
+            device_type, mesh_shape=(dp, infer_tp, infer_pp), mesh_dim_names=["dp", "infer_tp", "infer_pp"]
         )
 
         is_collect = (
@@ -538,6 +614,16 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def init_model(self):
+        if is_hpu_available:
+            actor_use_torch_compile = self.config.actor.megatron.get("use_torch_compile", False)
+            ref_use_torch_compile = self.config.ref.megatron.get("use_torch_compile", False)
+            actor_torch_compile_cache_limit = self.config.actor.megatron.get("torch_compile_cache_size_limit", 0)
+            ref_torch_compile_cache_limit = self.config.ref.megatron.get("torch_compile_cache_size_limit", 0)
+            min_cache_limit = min(actor_torch_compile_cache_limit, ref_torch_compile_cache_limit)
+            if actor_use_torch_compile or ref_use_torch_compile:
+                if min_cache_limit > 0:
+                    torch._dynamo.config.cache_size_limit = min_cache_limit
+
         if self.config.model.get("external_lib", None) is not None:
             # This is used to import external_lib into the huggingface systems
             import importlib
@@ -767,7 +853,12 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
     @DistProfiler.annotate(color="red", role="rollout_generate")
     def generate_sequences(self, prompts: DataProto):
         assert self._is_rollout
-        prompts = prompts.to(get_device_name())
+        if not is_hpu_available:
+            prompts = prompts.to(get_device_name())
+        else:
+            for key in prompts.keys():
+                prompts[key] = prompts[key].to("hpu")
+
         meta_info = {
             "eos_token_id": self.generation_config.eos_token_id
             if self.generation_config is not None

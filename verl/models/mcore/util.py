@@ -181,6 +181,8 @@ def preprocess_bshd(
     position_ids: torch.Tensor,
     sequence_parallel: bool = False,
     pre_process: bool = True,
+    alignment: int = 0,
+    force_keep_padding: bool = False,
 ):
     """
     Remove left padding from input_ids, attention_mask and position_ids
@@ -188,16 +190,22 @@ def preprocess_bshd(
     """
     assert attention_mask.ndim == 2
     assert position_ids.ndim == 2
-    cp_size = mpu.get_context_parallel_world_size()
-    assert cp_size == 1, "Context parallel size without seq_pack is not supported"
+    if not force_keep_padding:
+        cp_size = mpu.get_context_parallel_world_size()
+        assert cp_size == 1, "Context parallel size without seq_pack is not supported"
     batch_size = input_ids.shape[0]
     shape = list(input_ids.shape)  # batch_size, seq_len,...
     seq_lens = attention_mask.sum(dim=1)
-    seq_len = seq_lens.max().item()
-    if sequence_parallel:
-        sp_world_size = mpu.get_tensor_model_parallel_world_size()
-        pad_size = (sp_world_size - seq_len % sp_world_size) % sp_world_size
-        seq_len = seq_len + pad_size
+    if force_keep_padding:
+        seq_len = shape[1] # keep original sequence length
+    else:
+        seq_len = seq_lens.max().item()
+        if sequence_parallel:
+            sp_world_size = mpu.get_tensor_model_parallel_world_size()
+            pad_size = (sp_world_size - seq_len % sp_world_size) % sp_world_size
+            seq_len = seq_len + pad_size
+        if alignment > 0:
+            seq_len = (seq_len + alignment - 1) // alignment * alignment
     shape[1] = seq_len
     if pre_process:
         new_input_ids = torch.zeros(dtype=input_ids.dtype, device=input_ids.device, size=shape)
@@ -205,11 +213,14 @@ def preprocess_bshd(
         dtype=attention_mask.dtype, device=attention_mask.device, size=(batch_size, seq_len)
     )
     new_position_ids = torch.zeros(dtype=position_ids.dtype, device=position_ids.device, size=(batch_size, seq_len))
-    for i in range(batch_size):
-        if pre_process:
-            new_input_ids[i, : seq_lens[i]] = input_ids[i, attention_mask[i]]
-        new_attention_mask[i, : seq_lens[i]] = attention_mask[i, attention_mask[i]]
-        new_position_ids[i, : seq_lens[i]] = position_ids[i, attention_mask[i]]
+
+    position = torch.arange(shape[1], device=input_ids.device).expand(shape)
+    scatter_mask = position < seq_lens.unsqueeze(1)
+    if pre_process:
+        new_input_ids[scatter_mask] = input_ids[attention_mask]
+    new_attention_mask[scatter_mask] = attention_mask[attention_mask]
+    new_position_ids[scatter_mask] = position_ids[attention_mask]
+
     if pre_process:
         return new_input_ids, new_attention_mask, new_position_ids
     else:

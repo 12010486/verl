@@ -46,6 +46,7 @@ from verl.model_merger.megatron_model_merger import get_dynamic_pipeline_shards
 from verl.models.mcore import hf_to_mcore_config
 from verl.utils.device import get_device_name, get_torch_device
 from verl.utils.megatron_utils import get_model
+from verl.utils.device import is_hpu_available
 
 
 def _init_args():
@@ -150,7 +151,10 @@ def convert_checkpoint_from_transformers_to_megatron(
     ):
         global_layer_idx = layer_idx + layer_start
         numel_cur = numel
-        numel += safe_copy(hf_layer.input_layernorm.weight, layer.self_attention.linear_qkv.layer_norm_weight)
+        if not is_hpu_available:
+            numel += safe_copy(hf_layer.input_layernorm.weight, layer.self_attention.linear_qkv.layer_norm_weight)
+        else:
+            numel += safe_copy(hf_layer.input_layernorm.weight, layer.input_layernorm.weight)
 
         q = hf_layer.self_attn.q_proj.weight.view(
             [num_key_value_heads, head_dim * num_attention_heads // num_key_value_heads, -1]

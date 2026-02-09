@@ -38,7 +38,7 @@ from torch import nn
 
 from verl import DataProto
 from verl.trainer.ppo.core_algos import agg_loss, get_policy_loss_fn, kl_penalty
-from verl.utils.device import get_device_id, get_torch_device
+from verl.utils.device import get_device_id, get_torch_device, is_hpu_available
 from verl.utils.megatron.pipeline_parallel import make_batch_generator
 from verl.utils.megatron.router_replay_patch import RouterReplay, RouterReplayAction
 from verl.utils.megatron.router_replay_utils import (
@@ -683,28 +683,40 @@ class MegatronPPOActor(BasePPOActor):
         # batch should be a list of batches inside micro-batches
         batch_generator = make_batch_generator(micro_batches, vpp_size=len(self.actor_module))
 
-        # TODO: we may use the new schedule instead
-        # for flash-attn: (seq_len, batch_size, hidden_size) = (mbs*seq_len, 1, hidden_size)
-        if mpu.get_pipeline_model_parallel_world_size() > 1:
-            losses_reduced = forward_backward_func(
-                forward_step_func=forward_step,
-                data_iterator=batch_generator,
-                model=self.actor_module,
-                num_microbatches=n_micro_batch,
-                seq_length=total_seqlen,  # no use when input_shapes was set
-                micro_batch_size=1,  # no use when input_shapes was set
-                forward_only=forward_only,
-            )
+        if not is_hpu_available:
+            # TODO: we may use the new schedule instead
+            # for flash-attn: (seq_len, batch_size, hidden_size) = (mbs*seq_len, 1, hidden_size)
+            if mpu.get_pipeline_model_parallel_world_size() > 1:
+                losses_reduced = forward_backward_func(
+                    forward_step_func=forward_step,
+                    data_iterator=batch_generator,
+                    model=self.actor_module,
+                    num_microbatches=n_micro_batch,
+                    seq_length=total_seqlen,  # no use when input_shapes was set
+                    micro_batch_size=1,  # no use when input_shapes was set
+                    forward_only=forward_only,
+                )
+            else:
+                losses_reduced = forward_backward_func(
+                    forward_step_func=forward_step,
+                    data_iterator=batch_generator,
+                    model=self.actor_module,
+                    num_microbatches=n_micro_batch,
+                    seq_length=total_seqlen,  # in use for pp = 1
+                    micro_batch_size=1,  # in use for pp = 1
+                    forward_only=forward_only,
+                )
         else:
             losses_reduced = forward_backward_func(
                 forward_step_func=forward_step,
                 data_iterator=batch_generator,
                 model=self.actor_module,
                 num_microbatches=n_micro_batch,
-                seq_length=total_seqlen,  # in use for pp = 1
-                micro_batch_size=1,  # in use for pp = 1
+                seq_length=seq_len,
+                micro_batch_size=micro_batch_size,
                 forward_only=forward_only,
             )
+
         # loss_reduces contains the stats returned from loss_func
 
         if self.has_multi_modal_inputs:

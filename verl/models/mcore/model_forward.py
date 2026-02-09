@@ -28,7 +28,7 @@ from .util import (
     preprocess_packed_seqs,
     preprocess_thd_no_padding,
 )
-
+from verl.utils.device import is_hpu_available
 
 def model_forward_gen(vision_model: bool = False):
     def model_forward(

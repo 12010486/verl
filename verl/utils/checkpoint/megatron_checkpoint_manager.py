@@ -30,7 +30,7 @@ from ray.util.state import api
 from transformers import GenerationConfig
 
 from verl.models.weight_loader_registry import get_weight_saver
-from verl.utils.device import get_device_name, get_torch_device
+from verl.utils.device import get_device_name, get_torch_device, is_hpu_available
 from verl.utils.fs import is_non_local, local_mkdir_safe
 from verl.utils.logger import log_with_rank
 from verl.utils.megatron.dist_checkpointing import load_dist_checkpointing, save_dist_checkpointing
@@ -266,7 +266,10 @@ class MegatronCheckpointManager(BaseCheckpointManager):
         # Optimizer State Dict
         if generate_optimizer:
             torch.distributed.barrier()
-            optimizer_sharded_states = self.optimizer.sharded_state_dict(state_dict, is_loading=is_loading)
+            if is_hpu_available:
+                optimizer_sharded_states = self.optimizer.sharded_state_dict(state_dict, **(optim_sd_kwargs or {}))
+            else:
+                optimizer_sharded_states = self.optimizer.sharded_state_dict(state_dict, is_loading=is_loading)
             state_dict["optimizer"] = optimizer_sharded_states
 
             if self.lr_scheduler is not None:
@@ -315,14 +318,18 @@ class MegatronCheckpointManager(BaseCheckpointManager):
         dist_checkpoint_path = get_dist_checkpoint_path(local_path)
 
         # Get State Dict for loading
-        sharded_state_dict = self.generate_state_dict(
+        if is_hpu_available:
+            optim_sd_kwargs = dict(is_loading=True)
+            sharded_state_dict = self.generate_state_dict(optim_sd_kwargs=optim_sd_kwargs)
+        else:
+            sharded_state_dict = self.generate_state_dict(
             self.should_load_model and self.use_dist_checkpointing,
             self.should_load_optimizer,
             self.should_load_extra,
             is_loading=True,
         )
         log_with_rank(f"Generated state dict for loading: {sharded_state_dict.keys()}", rank=self.rank, logger=logger)
-
+        
         # Load Dist Checkpointing
         state_dict = load_dist_checkpointing(
             sharded_state_dict=sharded_state_dict,

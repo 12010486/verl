@@ -16,6 +16,7 @@ from importlib.metadata import PackageNotFoundError, version
 
 from .vllm_rollout import vLLMAsyncRollout  # noqa: F401
 
+from verl.utils.device import is_hpu_available
 
 def get_version(pkg):
     try:

@@ -18,11 +18,12 @@
 import inspect
 from abc import ABC, abstractmethod
 
-from megatron.core.models.gpt.gpt_layer_specs import get_gpt_decoder_block_spec, get_gpt_mtp_block_spec
+from megatron.core.models.gpt.gpt_layer_specs import get_gpt_decoder_block_spec
 from megatron.core.models.gpt.gpt_model import GPTModel
 
 from .config_converter import PretrainedConfig, TransformerConfig
 
+from verl.utils.device import is_hpu_available
 
 class BaseModelInitializer(ABC):
     """Base class for model initializers."""
@@ -71,20 +72,35 @@ class BaseModelInitializer(ABC):
         transformer_layer_spec = self.get_transformer_layer_spec(vp_stage=vp_stage)
         rope_scaling_args = self.get_rope_scaling_args()
         mtp_block_spec = extra_kwargs.get("mtp_block_spec", None)
-        model = GPTModel(
-            config=self.tfconfig,
-            transformer_layer_spec=transformer_layer_spec,
-            vocab_size=self.hf_config.vocab_size,
-            max_sequence_length=self.hf_config.max_position_embeddings,
-            pre_process=pre_process,
-            post_process=post_process,
-            share_embeddings_and_output_weights=share_embeddings_and_output_weights,
-            position_embedding_type="rope",
-            rotary_base=self.hf_config.rope_theta,
-            **rope_scaling_args,
-            mtp_block_spec=mtp_block_spec,
-            **({} if not self.has_vp_stage else {"vp_stage": vp_stage}),
-        )
+        if not is_hpu_available:
+            model = GPTModel(
+                config=self.tfconfig,
+                transformer_layer_spec=transformer_layer_spec,
+                vocab_size=self.hf_config.vocab_size,
+                max_sequence_length=self.hf_config.max_position_embeddings,
+                pre_process=pre_process,
+                post_process=post_process,
+                share_embeddings_and_output_weights=share_embeddings_and_output_weights,
+                position_embedding_type="rope",
+                rotary_base=self.hf_config.rope_theta,
+                **rope_scaling_args,
+                mtp_block_spec=mtp_block_spec,
+                **({} if not self.has_vp_stage else {"vp_stage": vp_stage}),
+            )
+        else:
+            model = GPTModel(
+                config=self.tfconfig,
+                transformer_layer_spec=transformer_layer_spec,
+                vocab_size=self.hf_config.vocab_size,
+                max_sequence_length=self.hf_config.max_position_embeddings,
+                pre_process=pre_process,
+                post_process=post_process,
+                share_embeddings_and_output_weights=share_embeddings_and_output_weights,
+                position_embedding_type="rope",
+                rotary_base=self.hf_config.rope_theta,
+                **rope_scaling_args,
+                **({} if not self.has_vp_stage else {"vp_stage": vp_stage}),
+            )
 
         if post_process and value:
             from verl.models.llama.megatron.layers.parallel_linear import LinearForLastLayer
@@ -102,8 +118,10 @@ class DenseModel(BaseModelInitializer):
     def get_transformer_layer_spec(self, vp_stage=None):
         assert self.tfconfig.normalization == "RMSNorm", "only RMSNorm is supported for now"
         extra_kwargs = {} if not self.has_vp_stage else {"vp_stage": vp_stage}
-        return get_gpt_decoder_block_spec(self.tfconfig, use_transformer_engine=True, **extra_kwargs)
-
+        if is_hpu_available:
+            return get_gpt_decoder_block_spec(self.tfconfig, use_transformer_engine=True, enable_fsdpa=self.tfconfig.use_fused_sdpa, **extra_kwargs)
+        else:
+            return get_gpt_decoder_block_spec(self.tfconfig, use_transformer_engine=True, **extra_kwargs)
 
 class Qwen2MoEModel(BaseModelInitializer):
     """Initializer for Qwen2 MoE models."""
@@ -111,7 +129,10 @@ class Qwen2MoEModel(BaseModelInitializer):
     def get_transformer_layer_spec(self, vp_stage=None):
         assert self.tfconfig.normalization == "RMSNorm", "only RMSNorm is supported for now"
         extra_kwargs = {} if not self.has_vp_stage else {"vp_stage": vp_stage}
-        transformer_layer_spec = get_gpt_decoder_block_spec(self.tfconfig, use_transformer_engine=True, **extra_kwargs)
+        if is_hpu_available:
+            transformer_layer_spec = get_gpt_decoder_block_spec(self.tfconfig, use_transformer_engine=True, enable_fsdpa=self.tfconfig.use_fused_sdpa, **extra_kwargs)
+        else:
+            transformer_layer_spec = get_gpt_decoder_block_spec(self.tfconfig, use_transformer_engine=True, **extra_kwargs)
 
         # Patch layer spec for shared experts
         for i in range(len(transformer_layer_spec.layer_specs)):
@@ -135,7 +156,10 @@ class MixtralModel(BaseModelInitializer):
     def get_transformer_layer_spec(self, vp_stage=None):
         assert self.tfconfig.normalization == "RMSNorm", "only RMSNorm is supported for now"
         extra_kwargs = {} if not self.has_vp_stage else {"vp_stage": vp_stage}
-        transformer_layer_spec = get_gpt_decoder_block_spec(self.tfconfig, use_transformer_engine=True, **extra_kwargs)
+        if is_hpu_available:
+            transformer_layer_spec = get_gpt_decoder_block_spec(self.tfconfig, use_transformer_engine=True, enable_fsdpa=self.tfconfig.use_fused_sdpa, **extra_kwargs)
+        else:
+            transformer_layer_spec = get_gpt_decoder_block_spec(self.tfconfig, use_transformer_engine=True, **extra_kwargs)
         return transformer_layer_spec
 
     def initialize(self, **kwargs):
@@ -153,7 +177,10 @@ class Qwen3MoEModel(BaseModelInitializer):
     def get_transformer_layer_spec(self, vp_stage=None):
         assert self.tfconfig.normalization == "RMSNorm", "only RMSNorm is supported for now"
         extra_kwargs = {} if not self.has_vp_stage else {"vp_stage": vp_stage}
-        transformer_layer_spec = get_gpt_decoder_block_spec(self.tfconfig, use_transformer_engine=True, **extra_kwargs)
+        if is_hpu_available:
+            transformer_layer_spec = get_gpt_decoder_block_spec(self.tfconfig, use_transformer_engine=True, enable_fsdpa=self.tfconfig.use_fused_sdpa, **extra_kwargs)
+        else:
+            transformer_layer_spec = get_gpt_decoder_block_spec(self.tfconfig, use_transformer_engine=True, **extra_kwargs)
         return transformer_layer_spec
 
     def initialize(self, **kwargs):
@@ -171,7 +198,10 @@ class DeepseekV3Model(BaseModelInitializer):
 
     def get_transformer_layer_spec(self, vp_stage=None):
         extra_kwargs = {} if not self.has_vp_stage else {"vp_stage": vp_stage}
-        transformer_layer_spec = get_gpt_decoder_block_spec(self.tfconfig, use_transformer_engine=True, **extra_kwargs)
+        if is_hpu_available:
+            transformer_layer_spec = get_gpt_decoder_block_spec(self.tfconfig, use_transformer_engine=True, enable_fsdpa=self.tfconfig.use_fused_sdpa, **extra_kwargs)
+        else:
+            transformer_layer_spec = get_gpt_decoder_block_spec(self.tfconfig, use_transformer_engine=True, **extra_kwargs)
         return transformer_layer_spec
 
     def get_rope_scaling_args(self) -> dict:
@@ -208,7 +238,10 @@ class Qwen25VLModel(BaseModelInitializer):
 
     def get_transformer_layer_spec(self, vp_stage=None):
         extra_kwargs = {} if not self.has_vp_stage else {"vp_stage": vp_stage}
-        transformer_layer_spec = get_gpt_decoder_block_spec(self.tfconfig, use_transformer_engine=True, **extra_kwargs)
+        if is_hpu_available:
+            transformer_layer_spec = get_gpt_decoder_block_spec(self.tfconfig, use_transformer_engine=True, enable_fsdpa=self.tfconfig.use_fused_sdpa, **extra_kwargs)
+        else:
+            transformer_layer_spec = get_gpt_decoder_block_spec(self.tfconfig, use_transformer_engine=True, **extra_kwargs)
         return transformer_layer_spec
 
     def initialize(
