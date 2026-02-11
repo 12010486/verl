@@ -532,7 +532,11 @@ class RayWorkerGroup(WorkerGroup):
         world_size = resource_pool.world_size
         use_gpu = resource_pool.use_gpu
         local_world_size = resource_pool.store[0]
-        num_gpus = 1 / resource_pool.max_colocate_count
+        # HPU resources cannot be fractionally allocated like GPUs
+        if self.device_name == "hpu":
+            num_gpus = 1
+        else:
+            num_gpus = 1 / resource_pool.max_colocate_count
 
         # we pass in environment variable at option so that Worker can use environment variable to set
         env_vars = {
