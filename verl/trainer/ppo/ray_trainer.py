@@ -75,7 +75,8 @@ class ResourcePoolManager:
     resource_pool_spec: dict[str, list[int]]
     mapping: dict[Role, str]
     resource_pool_dict: dict[str, RayResourcePool] = field(default_factory=dict)
-
+    device_name: str = "cuda"
+    
     def create_resource_pool(self):
         """Create Ray resource pools for distributed training.
 

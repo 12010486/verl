@@ -102,6 +102,7 @@ class RayResourcePool(ResourcePool):
         max_colocate_count: int = 10,
         detached=False,
         accelerator_type: Optional[str] = None,
+        device_name: str = "cuda",
     ) -> None:
         super().__init__(process_on_nodes, max_colocate_count)
         self.use_gpu = use_gpu
@@ -110,10 +111,14 @@ class RayResourcePool(ResourcePool):
         self.pgs = None
         self.detached = detached
         self.accelerator_type = accelerator_type
-
-    def get_placement_groups(self, strategy="STRICT_PACK", name=None, device_name="cuda"):
+        self.device_name = device_name 
+    
+    def get_placement_groups(self, strategy="STRICT_PACK", name=None, device_name=None):
         if self.pgs is not None:
             return self.pgs
+        
+        if device_name is None:
+            device_name = self.device_name
 
         pg_name_prefix = (
             name if name else f"{self.name_prefix}verl_group_{'_'.join([str(count) for count in self._store])}:"
@@ -233,7 +238,8 @@ def split_resource_pool(
             placement_groups=placement_groups,
             start_bundle_index=start_bundle_idx_list[split_idx],
             subgroup_world_size=split_size_list[split_idx],
-        )
+            device_name=resource_pool.device_name,
+)
         for split_idx in range(len(split_size_list))
     ]
     return split_resource_pools
@@ -244,10 +250,11 @@ def merge_resource_pool(rp1: RayResourcePool, rp2: RayResourcePool) -> RayResour
     assert rp1.max_colocate_count == rp2.max_colocate_count, "Both RayResourcePool must has the same max_colocate_count"
     assert rp1.n_gpus_per_node == rp2.n_gpus_per_node, "Both RayResourcePool must has the same n_gpus_per_node"
     assert rp1.detached == rp2.detached, "Detached ResourcePool cannot be merged with non-detached ResourcePool"
+    assert rp1.device_name == rp2.device_name, "Both RayResourcePool must has the same device_name"
 
     new_store = rp1.store + rp2.store
 
-    merged = type(rp1)(new_store, rp1.use_gpu, f"{rp1.name_prefix}_{rp2.name_prefix}")
+    merged = type(rp1)(new_store, rp1.use_gpu, f"{rp1.name_prefix}_{rp2.name_prefix}", device_name=rp1.device_name)
     merged.pgs = rp1.get_placement_groups() + rp2.get_placement_groups()
 
     return merged
